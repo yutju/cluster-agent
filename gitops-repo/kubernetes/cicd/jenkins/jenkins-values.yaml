@@ -1,0 +1,130 @@
+controller:
+  # 1. 필수 플러그인 자동 설치
+  installPlugins:
+    - kubernetes:latest
+    - workflow-aggregator:latest
+    - gitlab-plugin:latest
+    - docker-workflow:latest
+    - blueocean:latest
+    - configuration-as-code:latest
+    - credentials-binding:latest
+    - json-path-api:latest
+    - job-dsl:latest
+
+  # 2. 외부 접속 설정 (이제 32000 포트가 진짜로 열립니다)
+  serviceType: NodePort
+  nodePort: 32000
+
+  # 3. 스타트업 프로브 확장 (★쿠버네티스가 부팅을 최대 5분 동안 기다려주도록 조치)
+  startupProbe:
+    failureThreshold: 30    # 10초씩 총 30번 기회를 줌 (300초 = 5분)
+    periodSeconds: 10       # 10초 간격으로 검사
+
+  # 4. 리소스 할당량
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1024Mi"
+    limits:
+      cpu: "1000m"
+      memory: "2048Mi"
+
+  # 5. 관리자 계정 설정 (이제 army6를 똑바로 읽어옵니다)
+  admin:
+    existingSecret: "jenkins-admin-secret"
+    userKey: "jenkins-admin-user"
+    passwordKey: "jenkins-admin-password"
+
+  # 6. JCasC 자동 설정
+  JCasC:
+    defaultConfig: true
+    configScripts:
+      global-settings: |
+        jenkins:
+          globalNodeProperties:
+            - envVars:
+                env:
+                  - key: GITLAB_URL
+                    value: "${GITLAB_URL}"
+                  - key: JENKINS_IP
+                    value: "${JENKINS_IP}"
+                  - key: JENKINS_PORT
+                    value: "${JENKINS_PORT}"
+      gitlab-setting: |
+        unclassified:
+          gitLabConnectionConfig:
+            connections:
+              - name: "my-gitlab"
+                url: "${GITLAB_URL}"
+                apiTokenId: "gitlab-token-id"
+                clientBuilderId: "autodetect"
+                ignoreCertificateErrors: true
+      gitlab-credentials: |
+        credentials:
+          system:
+            domainCredentials:
+              - credentials:
+                  - string:
+                      scope: GLOBAL
+                      id: "gitlab-token-id"
+                      secret: "${GITLAB_TOKEN}"
+                      description: "GitLab Personal Access Token for API"
+                  - usernamePassword:
+                      scope: GLOBAL
+                      id: "gitlab-checkout-cred"
+                      username: "${GITLAB_USER}"
+                      password: "${GITLAB_TOKEN}"
+                      description: "GitLab Checkout Credential"
+      project-setup: |
+        jobs:
+          - script: >
+              pipelineJob('jenkins-test-pipeline') {
+                definition {
+                  cpsScm {
+                    scm {
+                      git {
+                        remote {
+                          url("${GITLAB_URL}/root/app-repo.git")
+                          credentials('gitlab-checkout-cred')
+                        }
+                        branches('*/main')
+                      }
+                    }
+                    scriptPath('Jenkinsfile')
+                  }
+                }
+              }
+
+  # 7. 환경 변수 주입 (configMapKeyRef로 완벽 수정)
+  containerEnv:
+    - name: GITLAB_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: gitlab-api-secret
+          key: api-token
+    - name: GITLAB_URL
+      valueFrom:
+        configMapKeyRef:
+          name: jenkins-infra-config
+          key: GITLAB_URL
+    - name: GITLAB_USER
+      valueFrom:
+        configMapKeyRef:
+          name: jenkins-infra-config
+          key: GITLAB_USER
+    - name: JENKINS_IP
+      valueFrom:
+        configMapKeyRef:
+          name: jenkins-infra-config
+          key: JENKINS_IP
+    - name: JENKINS_PORT
+      valueFrom:
+        configMapKeyRef:
+          name: jenkins-infra-config
+          key: JENKINS_PORT
+
+# 8. 데이터 보존 설정 (이것만 최상단 유지)
+persistence:
+  enabled: true
+  existingClaim: jenkins-pvc
+  storageClass: "local-path"

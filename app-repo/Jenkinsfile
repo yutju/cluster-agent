@@ -1,0 +1,182 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: jenkins-agent
+spec:
+  containers:
+  - name: kubectl
+    image: alpine:latest
+    command: ["sleep"]
+    args: ["infinity"]
+    securityContext:
+      runAsUser: 0
+    envFrom:
+    - configMapRef:
+        name: jenkins-infra-config
+    volumeMounts:
+    - name: docker-socket
+      mountPath: /var/run
+  - name: docker
+    image: docker:dind
+    securityContext:
+      privileged: true
+    env:
+    - name: DOCKER_TLS_CERTDIR
+      value: ""
+    volumeMounts:
+    - name: dind-storage
+      mountPath: /var/lib/docker
+    - name: docker-socket
+      mountPath: /var/run
+  volumes:
+  - name: dind-storage
+    emptyDir: {}
+  - name: docker-socket
+    emptyDir: {}
+"""
+        }
+    }
+
+    environment {
+        GITLAB_API_TOKEN = credentials('gitlab-token-id')
+        GITLAB_URL = "${env.GITLAB_URL}"
+
+        GITLAB_PROJECT_ID = "root%2Fapp-repo"
+        JENKINS_WEBHOOK_URL = "http://${env.JENKINS_IP}:${env.JENKINS_PORT}/project/jenkins-test-pipeline"
+
+        IMAGE_NAME   = "hello-k3s"
+        IMAGE_TAG    = "${BUILD_NUMBER}"
+
+        GITOPS_REPO  = "http://192.168.72.131/root/gitops-repo.git"
+
+        // 🌟 에이전트 컨테이너가 DinD(Docker-in-Docker) 소켓을 정확히 찌르도록 환경 변수 강제 주입
+        DOCKER_HOST  = "unix:///var/run/docker.sock"
+    }
+
+    triggers {
+        gitlab(
+            triggerOnPush: true,
+            triggerOnMergeRequest: true,
+            secretToken: "jenkins-test-secret"
+        )
+        cron('0 9 * * 1-5')
+    }
+
+    stages {
+        stage('0. 기본 에이전트 도구 주입') {
+            steps {
+                container('kubectl') {
+                    echo "에이전트 내부에 기본 패키지 및 git 주입 중..."
+                    sh "apk add --no-cache curl openssl docker-cli bash git > /dev/null"
+                }
+            }
+        }
+
+        stage('1. 코드 체크아웃') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('2. GitLab 웹훅 자동 등록') {
+            steps {
+                container('kubectl') {
+                    script {
+                        def gitlabApiBase = "${env.GITLAB_URL}/api/v4"
+                        echo "GitLab API를 통해 웹훅 자동 등록 시도 중..."
+                        sh """
+                        EXISTING_HOOK=\$(curl --header "PRIVATE-TOKEN: ${env.GITLAB_API_TOKEN}" \
+                            --silent "${gitlabApiBase}/projects/${env.GITLAB_PROJECT_ID}/hooks" | grep "${env.JENKINS_WEBHOOK_URL}" || true)
+
+                        if [ -z "\$EXISTING_HOOK" ]; then
+                            echo "기존 웹훅이 없으므로 새로 등록합니다."
+                            curl --header "PRIVATE-TOKEN: ${env.GITLAB_API_TOKEN}" \
+                                 --request POST "${gitlabApiBase}/projects/${env.GITLAB_PROJECT_ID}/hooks?url=${env.JENKINS_WEBHOOK_URL}&push_events=true&token=jenkins-test-secret&enable_ssl_verification=false"
+                        else
+                            echo "이미 웹훅이 등록되어 있습니다."
+                        fi
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('3. Docker Image Build') {
+            steps {
+                container('kubectl') {
+                    echo "로컬 Docker 이미지 빌드 중..."
+                    sh """
+                    # 🌟 [스마트 안전장치] 도커 소켓 파일이 디스크에 생성될 때까지 최대 30초간 유연하게 대기합니다.
+                    for i in \$(seq 1 30); do
+                        if [ -S /var/run/docker.sock ]; then
+                            echo "✅ 도커 데몬 소켓 연결 성공! (\${i}초 소요)"
+                            break
+                        fi
+                        echo "⏳ 도커 엔진이 아직 부팅 중입니다... (\${i}초)"
+                        sleep 1
+                    done
+
+                    # 최종 이미지 빌드 수행
+                    docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                    """
+                }
+            }
+        }
+
+        stage('4. AWS ECR Push (★현재는 로컬 테스트를 위해 스킵)') {
+            steps {
+                echo 'Skipping AWS ECR Push for Local Test Environment...'
+            }
+        }
+
+        stage('5. GitOps 레포 자동 수정 및 푸시 (★핵심 GitOps 도입)') {
+            steps {
+                container('kubectl') {
+                    echo 'gitops-repo의 배포 설계도를 새 이미지 태그로 수정합니다.'
+                    script {
+                        withCredentials([usernamePassword(credentialsId: 'gitlab-checkout-cred', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                            sh """
+                                # ① 사설 GitLab과의 통신 드롭 현상을 해결하기 위한 SSL 검증 우회 세팅
+                                git config --global user.email "jenkins@jenkins.com"
+                                git config --global user.name "Jenkins-CI"
+                                git config --global http.sslVerify false
+
+                                # ② 기존 임시 작업 공간 완전 청소
+                                rm -rf gitops-repo-tmp
+
+                                # ③ 'main' 브랜치를 명확히 지정하여 클론합니다.
+                                git clone -b main http://\${GIT_USERNAME}:\${GIT_PASSWORD}@192.168.72.131/root/gitops-repo.git gitops-repo-tmp
+
+                                # ④ 파일 시스템 동기화를 위한 안전 대기 시간 부여
+                                sleep 3
+
+                                # 🌟 [최종 정조준] 마트료시카 폴더 구조를 반영하여 중간에 /gitops-repo/ 를 추가했습니다!
+                                sed -i "s|image: .*|image: ${IMAGE_NAME}:${IMAGE_TAG}|g" gitops-repo-tmp/gitops-repo/kubernetes/apps/app/test-deployment.yaml
+
+                                # 🌟 [최종 진입] 커밋을 위해 이동하는 경로도 한 겹 더 깊게 들어갑니다.
+                                cd gitops-repo-tmp/gitops-repo
+                                git add kubernetes/apps/app/test-deployment.yaml
+                                git commit -m "image: 배포 이미지 자동 업데이트 (Build #${IMAGE_TAG})"
+                                git push origin main
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ CI 빌드 및 GitOps 설계도 갱신 성공! 이제 배포는 ArgoCD가 감시하여 처리합니다."
+        }
+        failure {
+            echo "❌ 빌드 실패: 크레덴셜 설정이나 스크립트 에러를 확인하세요."
+        }
+    }
+}
