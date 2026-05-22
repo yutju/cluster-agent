@@ -10,15 +10,16 @@ controller:
     - credentials-binding:latest
     - json-path-api:latest
     - job-dsl:latest
+    - aws-credentials:latest
 
-  # 2. 외부 접속 설정 (이제 32000 포트가 진짜로 열립니다)
+  # 2. 외부 접속 설정
   serviceType: NodePort
   nodePort: 32000
 
-  # 3. 스타트업 프로브 확장 (★쿠버네티스가 부팅을 최대 5분 동안 기다려주도록 조치)
+  # 3. 스타트업 프로브 확장
   startupProbe:
-    failureThreshold: 30    # 10초씩 총 30번 기회를 줌 (300초 = 5분)
-    periodSeconds: 10       # 10초 간격으로 검사
+    failureThreshold: 30
+    periodSeconds: 10
 
   # 4. 리소스 할당량
   resources:
@@ -29,7 +30,7 @@ controller:
       cpu: "1000m"
       memory: "2048Mi"
 
-  # 5. 관리자 계정 설정 (이제 army6를 똑바로 읽어옵니다)
+  # 5. 관리자 계정 설정
   admin:
     existingSecret: "jenkins-admin-secret"
     userKey: "jenkins-admin-user"
@@ -75,6 +76,17 @@ controller:
                       username: "${GITLAB_USER}"
                       password: "${GITLAB_TOKEN}"
                       description: "GitLab Checkout Credential"
+      aws-credentials: |
+        credentials:
+          system:
+            domainCredentials:
+              - credentials:
+                  - usernamePassword:
+                      scope: GLOBAL
+                      id: "aws-ecr-cred"
+                      username: "${AWS_ACCESS_KEY_ID}"
+                      password: "${AWS_SECRET_ACCESS_KEY}"
+                      description: "AWS ECR Credentials for Jenkins"
       project-setup: |
         jobs:
           - script: >
@@ -95,7 +107,7 @@ controller:
                 }
               }
 
-  # 7. 환경 변수 주입 (configMapKeyRef로 완벽 수정)
+  # 7. 환경 변수 주입
   containerEnv:
     - name: GITLAB_TOKEN
       valueFrom:
@@ -122,8 +134,18 @@ controller:
         configMapKeyRef:
           name: jenkins-infra-config
           key: JENKINS_PORT
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: aws-ecr-secret
+          key: access-key
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: aws-ecr-secret
+          key: secret-key
 
-# 8. 데이터 보존 설정 (이것만 최상단 유지)
+# 8. 데이터 보존 설정
 persistence:
   enabled: true
   existingClaim: jenkins-pvc
