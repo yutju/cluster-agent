@@ -1,41 +1,68 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
+
 metadata:
   name: jenkins-stack
   namespace: argocd
+
 spec:
   project: default
+
   source:
     repoURL: 'https://charts.jenkins.io'
     chart: jenkins
     targetRevision: 5.8.104
+
     helm:
       values: |
         controller:
+
           image:
             registry: docker.io
             repository: jenkins/jenkins
             tag: "2.516.1-lts-jdk17"
+
+          # 서비스 설정
+          serviceType: NodePort
+          servicePort: 8080
+          nodePort: 32000
+
+          # JNLP Agent 포트
+          agentListenerPort: 50000
+
+          # 최신 자동 업데이트 비활성화
           installLatestPlugins: false
           installLatestSpecifiedPlugins: false
+
+          # 플러그인 버전 고정
           installPlugins:
+
+            # Core
             - configuration-as-code:1810.v9b_c30a_249a_4c
             - job-dsl:1.87
+
+            # Kubernetes
             - kubernetes:4296.v20a_7e4d77cf6
+
+            # Pipeline
             - workflow-aggregator:600.vb_57cdd26fdd7
             - docker-workflow:572.v950f58993843
+
+            # GitLab
             - gitlab-plugin:1.8.0
+
+            # UI
             - blueocean:1.27.10
+
+            # Credentials
             - credentials-binding:657.v2b_19db_7d6e6d
             - credentials:1319.v7eb_51b_3a_c97b_
             - plain-credentials:143.v1b_df8b_d3b_e48
-            - json-path-api:2.9.0-33.v2527142f2e1d
+
+            # AWS
             - aws-credentials:218.v1b_e9466ec5da_
-          serviceType: NodePort
-          nodePort: 32000
-          startupProbe:
-            failureThreshold: 60
-            periodSeconds: 10
+
+          # 리소스
           resources:
             requests:
               cpu: "500m"
@@ -43,22 +70,87 @@ spec:
             limits:
               cpu: "1000m"
               memory: "2048Mi"
+
+          # Startup Probe
+          startupProbe:
+            failureThreshold: 60
+            periodSeconds: 10
+
+          # 관리자 계정
           admin:
             existingSecret: "jenkins-admin-secret"
             userKey: "jenkins-admin-user"
             passwordKey: "jenkins-admin-password"
+
+          # 환경 변수
+          containerEnv:
+
+            - name: GITLAB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-api-secret
+                  key: api-token
+
+            - name: GITLAB_URL
+              value: "http://192.168.72.131"
+
+            - name: GITLAB_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: jenkins-infra-config
+                  key: GITLAB_USER
+
+            - name: JENKINS_IP
+              valueFrom:
+                configMapKeyRef:
+                  name: jenkins-infra-config
+                  key: JENKINS_IP
+
+            - name: JENKINS_PORT
+              value: "32000"
+
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: aws-ecr-secret
+                  key: access-key
+
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-ecr-secret
+                  key: secret-key
+
+          # JCasC
           JCasC:
             defaultConfig: true
+
             configScripts:
+
               all-jenkins-config: |
                 jenkins:
-                  systemMessage: "Jenkins configured by ArgoCD"
-                  # 젠킨스 전역 속성에 환경 변수를 직접 노출
-                  globalNodeProperties:
-                    - envVars:
-                        env:
-                          - key: GITLAB_URL
-                            value: "http://192.168.72.131"
+
+                  systemMessage: "Jenkins configured automatically by ArgoCD"
+
+                  clouds:
+                    - kubernetes:
+                        name: "kubernetes"
+                        serverUrl: "https://kubernetes.default.svc"
+                        namespace: "jenkins"
+                        jenkinsUrl: "http://jenkins-stack:8080"
+                        jenkinsTunnel: "jenkins-stack-agent:50000"
+
+                        templates:
+                          - name: "jenkins-agent"
+                            label: "jenkins-agent"
+
+                            containers:
+                              - name: "jnlp"
+                                image: "jenkins/inbound-agent:3206.vb_15dcf73f6a_9-1"
+                                ttyEnabled: true
+                                command: ""
+                                args: "^${computer.jnlpmac} ^${computer.name}"
+
                 unclassified:
                   gitLabConnectionConfig:
                     connections:
@@ -67,6 +159,32 @@ spec:
                         apiTokenId: "gitlab-token-id"
                         clientBuilderId: "autodetect"
                         ignoreCertificateErrors: true
+
+                credentials:
+                  system:
+                    domainCredentials:
+                      - credentials:
+
+                          - string:
+                              scope: GLOBAL
+                              id: "gitlab-token-id"
+                              secret: "${GITLAB_TOKEN}"
+                              description: "GitLab API Token"
+
+                          - usernamePassword:
+                              scope: GLOBAL
+                              id: "gitlab-checkout-cred"
+                              username: "${GITLAB_USER}"
+                              password: "${GITLAB_TOKEN}"
+                              description: "GitLab Checkout Credential"
+
+                          - usernamePassword:
+                              scope: GLOBAL
+                              id: "aws-ecr-cred"
+                              username: "${AWS_ACCESS_KEY_ID}"
+                              password: "${AWS_SECRET_ACCESS_KEY}"
+                              description: "AWS ECR Credential"
+
                 jobs:
                   - script: >
                       pipelineJob('jenkins-test-pipeline') {
@@ -75,7 +193,6 @@ spec:
                             scm {
                               git {
                                 remote {
-                                  // env.GITLAB_URL을 사용하여 명시적 참조
                                   url("http://192.168.72.131/root/app-repo.git")
                                   credentials('gitlab-checkout-cred')
                                 }
@@ -86,24 +203,21 @@ spec:
                           }
                         }
                       }
-          containerEnv:
-            - name: GITLAB_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: gitlab-api-secret
-                  key: api-token
-            - name: GITLAB_URL
-              value: "http://192.168.72.131"
-          persistence:
-            enabled: true
-            existingClaim: jenkins-pvc
-            storageClass: "local-path"
+
+        # persistence 는 controller 밖에 있어야 함
+        persistence:
+          enabled: true
+          existingClaim: jenkins-pvc
+          storageClass: "local-path"
+
   destination:
     server: 'https://kubernetes.default.svc'
     namespace: jenkins
+
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
+
     syncOptions:
       - CreateNamespace=true
