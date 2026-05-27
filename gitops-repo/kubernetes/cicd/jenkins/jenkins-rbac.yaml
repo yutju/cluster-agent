@@ -6,8 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: jenkins
 subjects:
 - kind: ServiceAccount
-  #  'jenkins' 네임스페이스의 'default' 계정을 지정
-  name: default
+  name: jenkins-stack
   namespace: jenkins
 roleRef:
   kind: ClusterRole
