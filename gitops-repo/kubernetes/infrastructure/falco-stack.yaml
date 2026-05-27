@@ -1,0 +1,25 @@
+# kubernetes/infrastructure/falco-stack.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: falco
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: 'https://falcosecurity.github.io/charts'
+    chart: falco
+    targetRevision: 4.10.0 #  버전
+    helm:
+      values: |
+        falco:
+          jsonOutput: true
+        
+        
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: security # 보안 관련  네임스페이스
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

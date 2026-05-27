@@ -1,0 +1,109 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: jenkins-stack
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: 'https://charts.jenkins.io'
+    chart: jenkins
+    targetRevision: 5.8.104
+    helm:
+      values: |
+        controller:
+          image:
+            registry: docker.io
+            repository: jenkins/jenkins
+            tag: "2.516.1-lts-jdk17"
+          installLatestPlugins: false
+          installLatestSpecifiedPlugins: false
+          installPlugins:
+            - configuration-as-code:1810.v9b_c30a_249a_4c
+            - job-dsl:1.87
+            - kubernetes:4296.v20a_7e4d77cf6
+            - workflow-aggregator:600.vb_57cdd26fdd7
+            - docker-workflow:572.v950f58993843
+            - gitlab-plugin:1.8.0
+            - blueocean:1.27.10
+            - credentials-binding:657.v2b_19db_7d6e6d
+            - credentials:1319.v7eb_51b_3a_c97b_
+            - plain-credentials:143.v1b_df8b_d3b_e48
+            - json-path-api:2.9.0-33.v2527142f2e1d
+            - aws-credentials:218.v1b_e9466ec5da_
+          serviceType: NodePort
+          nodePort: 32000
+          startupProbe:
+            failureThreshold: 60
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1024Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2048Mi"
+          admin:
+            existingSecret: "jenkins-admin-secret"
+            userKey: "jenkins-admin-user"
+            passwordKey: "jenkins-admin-password"
+          JCasC:
+            defaultConfig: true
+            configScripts:
+              all-jenkins-config: |
+                jenkins:
+                  systemMessage: "Jenkins configured by ArgoCD"
+                  # 젠킨스 전역 속성에 환경 변수를 직접 노출
+                  globalNodeProperties:
+                    - envVars:
+                        env:
+                          - key: GITLAB_URL
+                            value: "http://192.168.72.131"
+                unclassified:
+                  gitLabConnectionConfig:
+                    connections:
+                      - name: "my-gitlab"
+                        url: "http://192.168.72.131"
+                        apiTokenId: "gitlab-token-id"
+                        clientBuilderId: "autodetect"
+                        ignoreCertificateErrors: true
+                jobs:
+                  - script: >
+                      pipelineJob('jenkins-test-pipeline') {
+                        definition {
+                          cpsScm {
+                            scm {
+                              git {
+                                remote {
+                                  // env.GITLAB_URL을 사용하여 명시적 참조
+                                  url("http://192.168.72.131/root/app-repo.git")
+                                  credentials('gitlab-checkout-cred')
+                                }
+                                branches('*/main')
+                              }
+                            }
+                            scriptPath('Jenkinsfile')
+                          }
+                        }
+                      }
+          containerEnv:
+            - name: GITLAB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-api-secret
+                  key: api-token
+            - name: GITLAB_URL
+              value: "http://192.168.72.131"
+          persistence:
+            enabled: true
+            existingClaim: jenkins-pvc
+            storageClass: "local-path"
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: jenkins
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
