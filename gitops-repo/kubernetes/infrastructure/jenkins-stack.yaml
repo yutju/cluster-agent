@@ -20,34 +20,35 @@ spec:
           servicePort: 8080
           nodePort: 32000
           agentListenerPort: 50000
-          
-          # [핵심] 의존성 자동 해결
-          installLatestPlugins: true
-          installLatestSpecifiedPlugins: true
+
+          admin:
+            existingSecret: "jenkins-stack"
+            userKey: "jenkins-admin-user"
+            passwordKey: "jenkins-admin-password"
+
           installPlugins:
             - configuration-as-code
             - job-dsl
             - kubernetes
             - workflow-aggregator
-            - docker-workflow
             - gitlab-plugin
-            - blueocean
             - credentials-binding
             - credentials
             - plain-credentials
-            - json-path-api
             - aws-credentials
 
-          # 관리자 계정 연동 (아래에 생성할 시크릿과 연결)
-          admin:
-            existingSecret: "jenkins-admin-secret"
-            userKey: "jenkins-admin-user"
-            passwordKey: "jenkins-admin-password"
+          # 젠킨스 시스템 환경변수로 토큰 주입 (가장 확실한 전달 방식)
+          containerEnv:
+            - name: GITLAB_TOKEN_ENV
+              valueFrom:
+                secretKeyRef:
+                  name: gitlab-api-secret
+                  key: api-token
 
           JCasC:
             defaultConfig: true
             configScripts:
-              all-jenkins-config: |
+              all-config: |
                 jenkins:
                   systemMessage: "Jenkins configured automatically by ArgoCD"
                   clouds:
@@ -64,15 +65,46 @@ spec:
                               - name: "jnlp"
                                 image: "jenkins/inbound-agent:3206.vb_15dcf73f6a_9-1"
                                 args: "^${computer.jnlpmac} ^${computer.name}"
+                
+                # Global 크리덴셜 명시적 등록
+                credentials:
+                  system:
+                    domainCredentials:
+                      - credentials:
+                          - usernamePassword:
+                              scope: GLOBAL
+                              id: "gitlab-checkout-cred"
+                              username: "root"
+                              password: "${GITLAB_TOKEN_ENV}" # 위에서 주입한 환경변수 참조
+                
+                jobs:
+                  - script: >
+                      pipelineJob('jenkins-test-pipeline') {
+                        definition {
+                          cpsScm {
+                            scm {
+                              git {
+                                remote {
+                                  url("http://192.168.72.131/root/app-repo.git")
+                                  credentials('gitlab-checkout-cred')
+                                }
+                                branches('*/main')
+                              }
+                            }
+                            scriptPath('Jenkinsfile')
+                          }
+                        }
+                      }
+                
                 unclassified:
                   gitLabConnectionConfig:
                     connections:
                       - name: "my-gitlab"
                         url: "http://192.168.72.131"
-                        apiTokenId: "gitlab-token-id"
+                        apiTokenId: "gitlab-checkout-cred" # 파이프라인과 ID 동일하게 일치시킴
                         clientBuilderId: "autodetect"
                         ignoreCertificateErrors: true
-        
+
         agent:
           enabled: true
           serviceType: ClusterIP
