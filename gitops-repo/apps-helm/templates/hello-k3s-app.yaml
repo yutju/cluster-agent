@@ -1,21 +1,18 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: root-bootstrap-app
+  name: hello-k3s-app
   namespace: argocd
-  finalizers:
-    - resources-finalizer.argoproj.io
 spec:
   project: default
   source:
-    repoURL: 'http://192.168.72.131/root/gitops-repo.git'
+    # 🌟 Helm 변수 주입을 통해 IP를 동적으로 가져옵니다.
+    repoURL: '{{ .Values.global.gitlabUrl }}/root/gitops-repo.git'
+    path: kubernetes/apps/app
     targetRevision: main
-    path: apps-helm
-    directory:
-      recurse: true
   destination:
     server: 'https://kubernetes.default.svc'
-    namespace: default
+    namespace: dev-apps
   syncPolicy:
     automated:
       prune: true
