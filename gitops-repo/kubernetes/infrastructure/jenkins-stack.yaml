@@ -12,71 +12,103 @@ spec:
     helm:
       values: |
         controller:
-          image:
-            registry: docker.io
-            repository: jenkins/jenkins
-            tag: "2.516.1-lts-jdk17"
+          #  젠킨스 시스템 시간을 한국 시간(KST) 설정
+          javaOpts: "-Duser.timezone=Asia/Seoul"
+
           serviceType: NodePort
           servicePort: 8080
           nodePort: 32000
           agentListenerPort: 50000
+
+          installLatestPlugins: true
+          installLatestSpecifiedPlugins: true
+          installPlugins:
+            - kubernetes
+            - workflow-aggregator
+            - git
+            - configuration-as-code
+            - job-dsl
+            - gitlab-plugin
+            - credentials-binding
+            - plain-credentials
+            - aws-credentials
 
           admin:
             existingSecret: "jenkins-stack"
             userKey: "jenkins-admin-user"
             passwordKey: "jenkins-admin-password"
 
-          installPlugins:
-            - configuration-as-code
-            - job-dsl
-            - kubernetes
-            - workflow-aggregator
-            - gitlab-plugin
-            - credentials-binding
-            - credentials
-            - plain-credentials
-            - aws-credentials
-
-          # 젠킨스 시스템 환경변수로 토큰 주입 (가장 확실한 전달 방식)
           containerEnv:
             - name: GITLAB_TOKEN_ENV
               valueFrom:
                 secretKeyRef:
                   name: gitlab-api-secret
                   key: api-token
+            - name: CM_GITLAB_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: jenkins-infra-config
+                  key: GITLAB_URL
+            - name: CM_JENKINS_IP
+              valueFrom:
+                configMapKeyRef:
+                  name: jenkins-infra-config
+                  key: JENKINS_IP
+            - name: CM_JENKINS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: jenkins-infra-config
+                  key: JENKINS_PORT
+            # 🌟 추가: AWS ECR 시크릿을 환경 변수로 주입
+            - name: AWS_ECR_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-ecr-secret
+                  key: access-key
+            - name: AWS_ECR_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: aws-ecr-secret
+                  key: secret-key
 
           JCasC:
             defaultConfig: true
             configScripts:
               all-config: |
                 jenkins:
-                  systemMessage: "Jenkins configured automatically by ArgoCD"
-                  clouds:
-                    - kubernetes:
-                        name: "kubernetes"
-                        serverUrl: "https://kubernetes.default.svc"
-                        namespace: "jenkins"
-                        jenkinsUrl: "http://jenkins-stack:8080"
-                        jenkinsTunnel: "jenkins-stack-agent:50000"
-                        templates:
-                          - name: "jenkins-agent"
-                            label: "jenkins-agent"
-                            containers:
-                              - name: "jnlp"
-                                image: "jenkins/inbound-agent:3206.vb_15dcf73f6a_9-1"
-                                args: "^${computer.jnlpmac} ^${computer.name}"
-                
-                # Global 크리덴셜 명시적 등록
+                  systemMessage: "Jenkins configured automatically by ArgoCD - Fully GitOps"
+
+                  globalNodeProperties:
+                    - envVars:
+                        env:
+                          - key: "GITLAB_URL"
+                            value: "${CM_GITLAB_URL}"
+                          - key: "JENKINS_IP"
+                            value: "${CM_JENKINS_IP}"
+                          - key: "JENKINS_PORT"
+                            value: "${CM_JENKINS_PORT}"
+
                 credentials:
                   system:
                     domainCredentials:
                       - credentials:
+                          - string:
+                              scope: GLOBAL
+                              id: "gitlab-token-id"
+                              secret: "${GITLAB_TOKEN_ENV}"
                           - usernamePassword:
                               scope: GLOBAL
                               id: "gitlab-checkout-cred"
                               username: "root"
-                              password: "${GITLAB_TOKEN_ENV}" # 위에서 주입한 환경변수 참조
-                
+                              password: "${GITLAB_TOKEN_ENV}"
+                          # 🌟 추가: 환경 변수를 참조하여 AWS ECR 자격 증명 자동 생성
+                          - usernamePassword:
+                              scope: GLOBAL
+                              id: "aws-ecr-cred"
+                              username: "${AWS_ECR_ACCESS_KEY}"
+                              password: "${AWS_ECR_SECRET_KEY}"
+                              description: "AWS ECR Credentials for Pipeline"
+
                 jobs:
                   - script: >
                       pipelineJob('jenkins-test-pipeline') {
@@ -85,7 +117,7 @@ spec:
                             scm {
                               git {
                                 remote {
-                                  url("http://192.168.72.131/root/app-repo.git")
+                                  url("${CM_GITLAB_URL}/root/app-repo.git")
                                   credentials('gitlab-checkout-cred')
                                 }
                                 branches('*/main')
@@ -95,20 +127,18 @@ spec:
                           }
                         }
                       }
-                
+
                 unclassified:
                   gitLabConnectionConfig:
                     connections:
                       - name: "my-gitlab"
-                        url: "http://192.168.72.131"
-                        apiTokenId: "gitlab-checkout-cred" # 파이프라인과 ID 동일하게 일치시킴
+                        url: "${CM_GITLAB_URL}"
+                        apiTokenId: "gitlab-token-id"
                         clientBuilderId: "autodetect"
                         ignoreCertificateErrors: true
 
         agent:
           enabled: true
-          serviceType: ClusterIP
-          port: 50000
 
         persistence:
           enabled: true

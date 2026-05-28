@@ -8,6 +8,7 @@ metadata:
   labels:
     app: jenkins-agent
 spec:
+  serviceAccountName: jenkins-stack
   containers:
   - name: kubectl
     image: alpine:latest
@@ -35,7 +36,7 @@ spec:
         GITLAB_PROJECT_ID = "root%2Fapp-repo"
         JENKINS_WEBHOOK_URL = "http://${env.JENKINS_IP}:${env.JENKINS_PORT}/project/jenkins-test-pipeline"
 
-        // 🌟 ECR 및 이미지 설정
+        // ECR 및 이미지 설정
         AWS_ACCOUNT_ID = "407002402096"
         AWS_REGION     = "ap-northeast-2"
         ECR_REGISTRY   = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
@@ -43,15 +44,20 @@ spec:
         IMAGE_TAG      = "${BUILD_NUMBER}"
         ECR_IMAGE_URI  = "${ECR_REGISTRY}/${ECR_REPO_NAME}:${IMAGE_TAG}"
 
-        // 🌟 파드 내부 네트워크(TCP)로 안전하게 통신
+        // 파드 내부 네트워크(TCP)로 안전하게 통신
         DOCKER_HOST    = "tcp://localhost:2375"
+    }
+
+    // 깃랩의 웹훅(Push) 알림을 수락하고 파이프라인을 자동 실행하는 트리거
+    triggers {
+        gitlab(triggerOnPush: true, triggerOnMergeRequest: true, branchFilterType: 'All', secretToken: 'jenkins-test-secret')
     }
 
     stages {
         stage('0. 기본 에이전트 도구 주입') {
             steps {
                 container('kubectl') {
-                    // 🌟 aws-cli 설치 후, kubectl 프로그램까지 다운로드해서 설치합니다!
+                    // aws-cli 설치 후, kubectl 프로그램까지 다운로드해서 설치합니다!
                     sh """
                     apk add --no-cache curl openssl docker-cli bash git aws-cli > /dev/null
                     curl -sLO "https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl"
@@ -86,7 +92,7 @@ spec:
             steps {
                 container('kubectl') {
                     script {
-                        // 🌟 도커 데몬 대기
+                        // 도커 데몬 대기
                         sh """
                         until docker info >/dev/null 2>&1; do
                             echo "Waiting for Docker daemon to start..."
@@ -127,7 +133,7 @@ spec:
                           --docker-username=AWS \
                           --docker-password=\$NEW_PASSWORD \
                           -n dev-apps
-                        echo "✅ ECR Secret이 최신 토큰으로 갱신되었습니다."
+                        echo "ECR Secret이 최신 토큰으로 갱신되었습니다."
                         """
                     }
                 }
@@ -147,10 +153,10 @@ spec:
                                 rm -rf gitops-repo-tmp
                                 git clone -b main http://\${GIT_USERNAME}:\${GIT_PASSWORD}@192.168.72.131/root/gitops-repo.git gitops-repo-tmp
 
-                                # 🌟 경로 수정 완료 (중복된 gitops-repo 폴더명 제거)
+                                # 경로 수정 완료 (중복된 gitops-repo 폴더명 제거)
                                 sed -i "s|image: .*|image: ${ECR_IMAGE_URI}|g" gitops-repo-tmp/kubernetes/apps/app/test-deployment.yaml
 
-                                # 🌟 이동 경로 수정 완료
+                                # 이동 경로 수정 완료
                                 cd gitops-repo-tmp
                                 git add kubernetes/apps/app/test-deployment.yaml
                                 git commit -m "image: ECR 이미지 업데이트 (Build #${IMAGE_TAG})"
