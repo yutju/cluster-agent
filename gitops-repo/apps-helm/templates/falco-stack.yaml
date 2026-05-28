@@ -23,3 +23,9 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    retry:
+      limit: 5 # 최대 5회까지 재시도
+      backoff:
+        duration: 5s # 1차 실패 시 5초 대기
+        factor: 2    # 실패할 때마다 대기 시간을 2배씩 늘림 (5초 -> 10초 -> 20초)
+        maxDuration: 3m # 아무리 길어져도 최대 3분 간격으로 계속 찌름
